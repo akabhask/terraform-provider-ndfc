@@ -22,19 +22,21 @@ package provider
 //template:begin imports
 import (
 	"context"
-	"fmt"
-	"net/url"
+	"log"
 
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 //template:end imports
 
+var DeployConfig = false
 //template:begin types
 type VRF struct {
 	Id                          types.String     `tfsdk:"id"`
+	Timeouts                    timeouts.Value   `tfsdk:"timeouts"`
 	FabricName                  types.String     `tfsdk:"fabric_name"`
 	VrfName                     types.String     `tfsdk:"vrf_name"`
 	VrfTemplate                 types.String     `tfsdk:"vrf_template"`
@@ -75,11 +77,13 @@ type VRF struct {
 	RouteTargetExportMvpn       types.String     `tfsdk:"route_target_export_mvpn"`
 	RouteTargetImportCloudEvpn  types.String     `tfsdk:"route_target_import_cloud_evpn"`
 	RouteTargetExportCloudEvpn  types.String     `tfsdk:"route_target_export_cloud_evpn"`
+	Timeout                     types.String     `tfsdk:"timeout"`
 	Attachments                 []VRFAttachments `tfsdk:"attachments"`
 }
 
 type VRFAttachments struct {
 	SerialNumber   types.String `tfsdk:"serial_number"`
+	DeployConfig   types.Bool   `tfsdk:"deploy_config"`
 	VlanId         types.Int64  `tfsdk:"vlan_id"`
 	FreeformConfig types.String `tfsdk:"freeform_config"`
 	LoopbackId     types.Int64  `tfsdk:"loopback_id"`
@@ -89,10 +93,7 @@ type VRFAttachments struct {
 
 //template:end types
 
-//template:begin getPath
-func (data VRF) getPath() string {
-	return fmt.Sprintf("/lan-fabric/rest/top-down/v2/fabrics/%v/vrfs/", url.QueryEscape(fmt.Sprintf("%v", data.FabricName.ValueString())))
-}
+
 
 //template:end getPath
 
@@ -218,6 +219,9 @@ func (data VRF) toBody(ctx context.Context) string {
 	if !data.RouteTargetExportCloudEvpn.IsNull() && !data.RouteTargetExportCloudEvpn.IsUnknown() {
 		body, _ = sjson.Set(body, "vrfTemplateConfig.cloudRouteTargetExportEvpn", data.RouteTargetExportCloudEvpn.ValueString())
 	}
+	if !data.Timeout.IsNull() && !data.Timeout.IsUnknown() {
+		body, _ = sjson.Set(body, "vrfTemplateConfig.timeout", data.Timeout.ValueString())
+	}
 	return body
 }
 
@@ -227,7 +231,6 @@ func (data VRF) toBodyAttachments(ctx context.Context, attachments gjson.Result)
 	body, _ = sjson.Set(body, "0.lanAttachList", []interface{}{})
 	attachments.Get("0").ForEach(func(k, v gjson.Result) bool {
 		serialNumber := v.Get("switchSerialNo").String()
-
 		itemBody := ""
 		if !data.FabricName.IsNull() && !data.FabricName.IsUnknown() {
 			itemBody, _ = sjson.Set(itemBody, "fabric", data.FabricName.ValueString())
@@ -261,7 +264,14 @@ func (data VRF) toBodyAttachments(ctx context.Context, attachments gjson.Result)
 				if instanceBody != "" {
 					itemBody, _ = sjson.Set(itemBody, "instanceValues", instanceBody)
 				}
-				itemBody, _ = sjson.Set(itemBody, "deployment", true)
+				if !item.DeployConfig.IsNull() && !item.DeployConfig.IsUnknown() {
+				    itemBody, _ = sjson.Set(itemBody, "deployment", item.DeployConfig.ValueBool())
+					if item.DeployConfig.ValueBool() == true {
+						DeployConfig = true
+					}
+				} else {
+					itemBody, _ = sjson.Set(itemBody, "deployment", false)
+				}
 			}
 		}
 		if !found {
@@ -477,6 +487,11 @@ func (data *VRF) fromBody(ctx context.Context, res gjson.Result) {
 	} else {
 		data.RouteTargetExportCloudEvpn = types.StringNull()
 	}
+	if value := res.Get("vrfTemplateConfig.Timeout"); value.Exists() && value.String() != "" {
+		data.Timeout = types.StringValue(value.String())
+	} else {
+		data.Timeout = types.StringNull()
+	}
 }
 
 func (data *VRF) fromBodyAttachments(ctx context.Context, res gjson.Result, all bool) {
@@ -547,11 +562,13 @@ func (data *VRF) fromBodyAttachments(ctx context.Context, res gjson.Result, all 
 		return true
 	})
 	for i := range data.Attachments {
-		for _, serial := range serialsToRemove {
-			if data.Attachments[i].SerialNumber.ValueString() == serial {
-				data.Attachments = append(data.Attachments[:i], data.Attachments[i+1:]...)
-				break
-			}
-		}
+		if ((i > 0) && (i < len(data.Attachments))) {
+			for _, serial := range serialsToRemove {
+			    if data.Attachments[i].SerialNumber.ValueString() == serial {
+				    data.Attachments = append(data.Attachments[:i], data.Attachments[i+1:]...)
+				    break
+				}
+		    }
+	    }
 	}
 }

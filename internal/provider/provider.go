@@ -25,6 +25,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+    "log"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
@@ -35,6 +36,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/netascode/go-nd"
 )
+
+
 
 const NDFC_BASEPATH = "/appcenter/cisco/ndfc/api/v1"
 
@@ -54,6 +57,10 @@ type NdfcProviderModel struct {
 	URL      types.String `tfsdk:"url"`
 	Insecure types.Bool   `tfsdk:"insecure"`
 	Retries  types.Int64  `tfsdk:"retries"`
+}
+type NdfcClient struct {
+	client      *nd.Client
+	updateMutex *sync.Mutex
 }
 
 // NdfcProviderData describes the data maintained by the provider.
@@ -252,6 +259,7 @@ func (p *NdfcProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 	// Create a new ND client and set it to the provider client
 	c, err := nd.NewClient(url, NDFC_BASEPATH, username, password, domain, insecure, nd.MaxRetries(int(retries)))
 	if err != nil {
+		log.Printf("New client creation error : %s %s", url, NDFC_BASEPATH)
 		resp.Diagnostics.AddError(
 			"Unable to create client",
 			"Unable to create nd client:\n\n"+err.Error(),
@@ -264,13 +272,17 @@ func (p *NdfcProvider) Configure(ctx context.Context, req provider.ConfigureRequ
 	resp.ResourceData = &data
 }
 
+func NewNdfcClient() resource.Resource {
+	return &NdfcClient{}
+}
+
 func (p *NdfcProvider) Resources(ctx context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewInterfaceEthernetResource,
 		NewInterfaceLoopbackResource,
 		NewInterfaceVlanResource,
 		NewNetworkResource,
-		NewVRFResource,
+		NewNdfcClient,
 	}
 }
 

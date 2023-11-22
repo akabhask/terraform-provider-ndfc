@@ -25,12 +25,9 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
-	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -40,39 +37,30 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
-	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
-	"github.com/netascode/go-nd"
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/netascode/terraform-provider-ndfc/internal/provider/helpers"
-	"github.com/tidwall/sjson"
 )
+
 
 //template:end imports
 
 //template:begin model
 
 // Ensure provider defined types fully satisfy framework interfaces
-var _ resource.Resource = &VRFResource{}
-var _ resource.ResourceWithImportState = &VRFResource{}
+var _ resource.Resource = &NdfcClient{}
+var _ resource.ResourceWithImportState = &NdfcClient{}
 
-func NewVRFResource() resource.Resource {
-	return &VRFResource{}
-}
 
-type VRFResource struct {
-	client      *nd.Client
-	updateMutex *sync.Mutex
-}
-
-func (r *VRFResource) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
+func (r *NdfcClient) Metadata(ctx context.Context, req resource.MetadataRequest, resp *resource.MetadataResponse) {
 	resp.TypeName = req.ProviderTypeName + "_vrf"
 }
 
-func (r *VRFResource) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
+
+func (r *NdfcClient) Schema(ctx context.Context, req resource.SchemaRequest, resp *resource.SchemaResponse) {
 	resp.Schema = schema.Schema{
 		// This description is used by the documentation generator and the language server.
 		MarkdownDescription: helpers.NewAttributeDescription("This resource can manage a VRF.").String,
-
 		Attributes: map[string]schema.Attribute{
 			"id": schema.StringAttribute{
 				MarkdownDescription: "The id of the object",
@@ -81,6 +69,12 @@ func (r *VRFResource) Schema(ctx context.Context, req resource.SchemaRequest, re
 					stringplanmodifier.UseStateForUnknown(),
 				},
 			},
+			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{
+                Create: true,
+				Update: true,
+				Delete: true,
+				Read: true,
+            }),
 			"fabric_name": schema.StringAttribute{
 				MarkdownDescription: helpers.NewAttributeDescription("The name of the fabric").String,
 				Optional:            true,
@@ -149,6 +143,10 @@ func (r *VRFResource) Schema(ctx context.Context, req resource.SchemaRequest, re
 					int64validator.Between(0, 4294967295),
 				},
 				Default: int64default.StaticInt64(12345),
+			},
+			"timeout": schema.StringAttribute{
+				MarkdownDescription: helpers.NewAttributeDescription("configure timeout").String,
+				Optional:            true,
 			},
 			"redistribute_direct_route_map": schema.StringAttribute{
 				MarkdownDescription: helpers.NewAttributeDescription("Redistribute direct route map").AddDefaultValueDescription("FABRIC-RMAP-REDIST-SUBNET").String,
@@ -338,6 +336,12 @@ func (r *VRFResource) Schema(ctx context.Context, req resource.SchemaRequest, re
 								int64validator.Between(0, 1023),
 							},
 						},
+						"deploy_config": schema.BoolAttribute{
+							MarkdownDescription: helpers.NewAttributeDescription("Deploy VRF attachments").AddDefaultValueDescription("false").String,
+							Optional:            true,
+							Computed:            true,
+							Default:             booldefault.StaticBool(false),
+						},
 						"loopback_ipv4": schema.StringAttribute{
 							MarkdownDescription: helpers.NewAttributeDescription("Override loopback IPv4 address").String,
 							Optional:            true,
@@ -353,7 +357,7 @@ func (r *VRFResource) Schema(ctx context.Context, req resource.SchemaRequest, re
 	}
 }
 
-func (r *VRFResource) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
+func (r *NdfcClient) Configure(_ context.Context, req resource.ConfigureRequest, _ *resource.ConfigureResponse) {
 	if req.ProviderData == nil {
 		return
 	}
@@ -364,289 +368,102 @@ func (r *VRFResource) Configure(_ context.Context, req resource.ConfigureRequest
 
 //template:end model
 
-func (r *VRFResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	var plan VRF
+func (r *NdfcClient) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	var state VRF
 
 	// Read plan
-	diags := req.Plan.Get(ctx, &plan)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
+	diags := req.Plan.Get(ctx, &state)
+	if ndfcCheckDiags(diags, resp) {
 		return
 	}
-
-	tflog.Debug(ctx, fmt.Sprintf("%s: Beginning Create", plan.Id.ValueString()))
-
-	// create vrf
-	body := plan.toBody(ctx)
-	r.updateMutex.Lock()
-	res, err := r.client.Post(plan.getPath(), body)
-	r.updateMutex.Unlock()
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to configure object (POST), got error: %s, %s", err, res.String()))
-		return
+    tflog.Debug(ctx, "Setting timeout for CREATE operation")
+    ctx, diags = state.ndfcSetTimeOut(ctx, "CREATE")
+	if ndfcCheckDiags(diags, resp) {
+		tflog.Debug(ctx,"Timeout is set for CREATE operation")
 	}
-	plan.Id = types.StringValue(plan.FabricName.ValueString() + "/" + plan.VrfName.ValueString())
-
-	if len(plan.Attachments) > 0 {
-		// attach
-		res, err = r.client.Get(fmt.Sprintf("%vattachments?vrf-names=%v", plan.getPath(), plan.VrfName.ValueString()))
-		if err != nil {
-			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to retrieve VRF attachments, got error: %s, %s", err, res.String()))
-			return
-		}
-		bodyAttachments := plan.toBodyAttachments(ctx, res)
-		r.updateMutex.Lock()
-		res, err = r.client.Post(plan.getPath()+"attachments", bodyAttachments)
-		r.updateMutex.Unlock()
-		if err != nil {
-			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to configure VRF attachments, got error: %s, %s", err, res.String()))
-			return
-		}
-		diags = helpers.CheckAttachmentResponse(ctx, res)
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-
-		// deploy
-		diags = r.Deploy(ctx, plan, "DEPLOYED")
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
+    if r.ndfcVrfCreate(ctx, req, resp, &state) == failed {
+        return
 	}
-
-	res, err = r.client.Get(fmt.Sprintf("%v%v", plan.getPath(), plan.VrfName.ValueString()))
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to retrieve object (GET), got error: %s, %s", err, res.String()))
-		return
-	}
-	plan.fromBody(ctx, res)
-
-	tflog.Debug(ctx, fmt.Sprintf("%s: Create finished successfully", plan.Id.ValueString()))
-
-	diags = resp.State.Set(ctx, &plan)
-	resp.Diagnostics.Append(diags...)
+	tflog.Debug(ctx, fmt.Sprintf("ndfcVrfCreate : %v", state.Id.ValueString()))
+	diags = resp.State.Set(ctx, &state)
+	ndfcCheckDiags(diags, resp)
 }
 
-func (r *VRFResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
+func (r *NdfcClient) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state VRF
 
 	// Read state
 	diags := req.State.Get(ctx, &state)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
+
+	if ndfcCheckDiags(diags, resp){
 		return
 	}
 
 	tflog.Debug(ctx, fmt.Sprintf("%s: Beginning Read", state.Id.String()))
 
-	res, err := r.client.Get(fmt.Sprintf("%v%v", state.getPath(), state.VrfName.ValueString()))
-	if err != nil {
-		if strings.Contains(err.Error(), "StatusCode 400") || strings.Contains(err.Error(), "StatusCode 500") {
-			resp.State.RemoveResource(ctx)
-			return
-		} else {
-			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to retrieve object (GET), got error: %s, %s", err, res.String()))
-			return
-		}
+	ctx, diags = state.ndfcSetTimeOut(ctx, "READ")
+	if ndfcCheckDiags(diags, resp) {
+		tflog.Debug(ctx,"Timeout is set for READ operation")
 	}
-	state.fromBody(ctx, res)
-
-	res, err = r.client.Get(fmt.Sprintf("%vattachments?vrf-names=%v", state.getPath(), state.VrfName.ValueString()))
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to retrieve VRF attachments, got error: %s, %s", err, res.String()))
+	if r.ndfcVrfRead(ctx, req, resp, &state) == failed {
 		return
 	}
-	state.fromBodyAttachments(ctx, res, false)
-
-	tflog.Debug(ctx, fmt.Sprintf("%s: Read finished successfully", state.Id.ValueString()))
-
+	tflog.Debug(ctx, fmt.Sprintf("ndfcVrfRead complete : %v", state.Id.ValueString()))
 	diags = resp.State.Set(ctx, &state)
-	resp.Diagnostics.Append(diags...)
+	ndfcCheckDiags(diags, resp)
 }
 
-func (r *VRFResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
+func (r *NdfcClient) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
 	var plan, state VRF
-
-	// Read plan
+	// Read the plan after computing the change
 	diags := req.Plan.Get(ctx, &plan)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
+
+	if ndfcCheckDiags(diags, resp) {
+		tflog.Debug(ctx,"Timeout is set for UPDATE operation")
 	}
-	// Read state
+	// Read config state from terrafrom .tf file
 	diags = req.State.Get(ctx, &state)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
-		return
+	if ndfcCheckDiags(diags, resp) {
+		tflog.Debug(ctx,"Timeout is set for UPDATE operation")
 	}
 
 	tflog.Debug(ctx, fmt.Sprintf("%s: Beginning Update", plan.Id.ValueString()))
+	ctx, diags = state.ndfcSetTimeOut(ctx, "UPDATE")
+	if ndfcCheckDiags(diags, resp) {
+		tflog.Debug(ctx,"Timeout is set for UPDATE operation")
+	}
 
 	plan.VrfId = state.VrfId
-	body := plan.toBody(ctx)
-	r.updateMutex.Lock()
-	res, err := r.client.Put(fmt.Sprintf("%v%v", plan.getPath(), plan.VrfName.ValueString()), body)
-	r.updateMutex.Unlock()
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to configure object (PUT), got error: %s, %s", err, res.String()))
+	if r.ndfcVrfUpdate(ctx, req, resp, &plan) == failed {
 		return
 	}
-
-	if len(plan.Attachments) > 0 {
-		// attach
-		res, err = r.client.Get(fmt.Sprintf("%vattachments?vrf-names=%v", plan.getPath(), plan.VrfName.ValueString()))
-		if err != nil {
-			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to retrieve VRF attachments, got error: %s, %s", err, res.String()))
-			return
-		}
-		bodyAttachments := plan.toBodyAttachments(ctx, res)
-		r.updateMutex.Lock()
-		res, err = r.client.Post(plan.getPath()+"attachments", bodyAttachments)
-		r.updateMutex.Unlock()
-		if err != nil {
-			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to configure VRF attachments, got error: %s, %s", err, res.String()))
-			return
-		}
-		diags = helpers.CheckAttachmentResponse(ctx, res)
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-
-		// deploy
-		diags = r.Deploy(ctx, plan, "DEPLOYED")
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-	}
-
-	res, err = r.client.Get(fmt.Sprintf("%v%v", plan.getPath(), plan.VrfName.ValueString()))
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to retrieve object (GET), got error: %s, %s", err, res.String()))
-		return
-	}
-	plan.fromBody(ctx, res)
-
 	tflog.Debug(ctx, fmt.Sprintf("%s: Update finished successfully", plan.Id.ValueString()))
 
 	diags = resp.State.Set(ctx, &plan)
-	resp.Diagnostics.Append(diags...)
+	ndfcCheckDiags(diags, resp)
 }
 
-func (r *VRFResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
+func (r *NdfcClient) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state VRF
 
 	// Read state
 	diags := req.State.Get(ctx, &state)
-	resp.Diagnostics.Append(diags...)
-	if resp.Diagnostics.HasError() {
+
+	if ndfcCheckDiags(diags, resp) {
 		return
 	}
-
-	tflog.Debug(ctx, fmt.Sprintf("%s: Beginning Delete", state.Id.ValueString()))
-
-	if len(state.Attachments) > 0 {
-		// detach everything
-		res, err := r.client.Get(fmt.Sprintf("%vattachments?vrf-names=%v", state.getPath(), state.VrfName.ValueString()))
-		if err != nil {
-			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to retrieve VRF attachments, got error: %s, %s", err, res.String()))
-			return
-		}
-		state.Attachments = make([]VRFAttachments, 0)
-		bodyAttachments := state.toBodyAttachments(ctx, res)
-		r.updateMutex.Lock()
-		res, err = r.client.Post(state.getPath()+"attachments", bodyAttachments)
-		r.updateMutex.Unlock()
-		if err != nil {
-			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to configure VRF attachments, got error: %s, %s", err, res.String()))
-			return
-		}
-		diags = helpers.CheckAttachmentResponse(ctx, res)
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-
-		// deploy
-		diags = r.Deploy(ctx, state, "NA")
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-	} else {
-		// if there is an ongoing deploy, wait for it to finish
-		diags = r.WaitForStatus(ctx, state, "NA")
-		resp.Diagnostics.Append(diags...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
+	ctx, diags = state.ndfcSetTimeOut(ctx, "DELETE")
+	if ndfcCheckDiags(diags, resp) {
+		tflog.Debug(ctx,"Timeout is set for DELETE operation")
 	}
-
-	// delete vrf
-	res, err := r.client.Delete(fmt.Sprintf("%v%v", state.getPath(), state.VrfName.ValueString()), "")
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Failed to delete object (DELETE), got error: %s, %s", err, res.String()))
+	if r.ndfcVrfDelete(ctx, req, resp, &state) == failed {
 		return
 	}
-
-	tflog.Debug(ctx, fmt.Sprintf("%s: Delete finished successfully", state.Id.ValueString()))
-
 	resp.State.RemoveResource(ctx)
 }
 
-func (r *VRFResource) Deploy(ctx context.Context, state VRF, expectedStatus string) diag.Diagnostics {
-	var diags diag.Diagnostics
-	tflog.Debug(ctx, fmt.Sprintf("%s: Beginning Deploy", state.Id.ValueString()))
-
-	body := ""
-	body, _ = sjson.Set(body, "vrfNames", state.VrfName.ValueString())
-	r.updateMutex.Lock()
-	defer r.updateMutex.Unlock()
-	res, err := r.client.Post(state.getPath()+"deployments", body)
-	if err != nil {
-		diags.AddError("Client Error", fmt.Sprintf("Failed to deploy VRF, got error: %s, %s", err, res.String()))
-		return diags
-	}
-
-	d := r.WaitForStatus(ctx, state, expectedStatus)
-	diags.Append(d...)
-	if diags.HasError() {
-		return diags
-	}
-
-	tflog.Debug(ctx, fmt.Sprintf("%s: Deploy finished successfully", state.Id.ValueString()))
-
-	return diags
-}
-
-func (r *VRFResource) WaitForStatus(ctx context.Context, state VRF, expectedStatus string) diag.Diagnostics {
-	var diags diag.Diagnostics
-	status := ""
-	for i := 0; i < (helpers.FABRIC_DEPLOY_TIMEOUT / 5); i++ {
-		res, err := r.client.Get(state.getPath())
-		if err != nil {
-			diags.AddError("Client Error", fmt.Sprintf("Failed to retrieve VRFs, got error: %s, %s", err, res.String()))
-			return diags
-		}
-		status = res.Get(`#(vrfName="` + state.VrfName.ValueString() + `").vrfStatus`).String()
-
-		if status == expectedStatus {
-			break
-		}
-		time.Sleep(5 * time.Second)
-	}
-	if status != expectedStatus {
-		diags.AddError("Client Error", fmt.Sprintf("VRF deployment timed out, got status: %s", status))
-		return diags
-	}
-	return diags
-}
-
 //template:begin import
-func (r *VRFResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
+func (r *NdfcClient) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("id"), req, resp)
 	idParts := strings.Split(req.ID, ":")
 
