@@ -36,6 +36,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
 	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
@@ -78,10 +79,16 @@ func (r *NdfcClient) Schema(ctx context.Context, req resource.SchemaRequest, res
 			"fabric_name": schema.StringAttribute{
 				MarkdownDescription: helpers.NewAttributeDescription("The name of the fabric").String,
 				Optional:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"vrf_name": schema.StringAttribute{
 				MarkdownDescription: helpers.NewAttributeDescription("The name of the VRF").String,
 				Required:            true,
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"vrf_template": schema.StringAttribute{
 				MarkdownDescription: helpers.NewAttributeDescription("The name of the VRF template").AddDefaultValueDescription("Default_VRF_Universal").String,
@@ -101,6 +108,9 @@ func (r *NdfcClient) Schema(ctx context.Context, req resource.SchemaRequest, res
 				Computed:            true,
 				Validators: []validator.Int64{
 					int64validator.Between(1, 16777214),
+				},
+				PlanModifiers: []planmodifier.Int64{
+					int64planmodifier.RequiresReplace(),
 				},
 			},
 			"vlan_id": schema.Int64Attribute{
@@ -370,7 +380,6 @@ func (r *NdfcClient) Configure(_ context.Context, req resource.ConfigureRequest,
 
 func (r *NdfcClient) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var state VRF
-
 	// Read plan
 	diags := req.Plan.Get(ctx, &state)
 	if ndfcCheckDiags(diags, resp) {
@@ -394,7 +403,12 @@ func (r *NdfcClient) Read(ctx context.Context, req resource.ReadRequest, resp *r
 
 	// Read state
 	diags := req.State.Get(ctx, &state)
+	tflog.Info(ctx, fmt.Sprintf(" Read call state : %v", state.VrfName.ValueString()))
+	if ndfcCheckDiags(diags, resp){
+		return
+	}
 
+	tflog.Info(ctx, fmt.Sprintf(" Read config  : %v", state.VrfName.ValueString()))
 	if ndfcCheckDiags(diags, resp){
 		return
 	}
@@ -417,7 +431,6 @@ func (r *NdfcClient) Update(ctx context.Context, req resource.UpdateRequest, res
 	var plan, state VRF
 	// Read the plan after computing the change
 	diags := req.Plan.Get(ctx, &plan)
-
 	if ndfcCheckDiags(diags, resp) {
 		tflog.Debug(ctx,"Timeout is set for UPDATE operation")
 	}
@@ -445,7 +458,6 @@ func (r *NdfcClient) Update(ctx context.Context, req resource.UpdateRequest, res
 
 func (r *NdfcClient) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state VRF
-
 	// Read state
 	diags := req.State.Get(ctx, &state)
 

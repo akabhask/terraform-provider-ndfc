@@ -240,6 +240,7 @@ func (data VRF) toBodyAttachments(ctx context.Context, attachments gjson.Result)
 		}
 		found := false
 		for _, item := range data.Attachments {
+			log.Printf("Akash item %v", item )
 			if item.SerialNumber.ValueString() == serialNumber {
 				found = true
 				if !item.SerialNumber.IsNull() && !item.SerialNumber.IsUnknown() {
@@ -264,8 +265,8 @@ func (data VRF) toBodyAttachments(ctx context.Context, attachments gjson.Result)
 				if instanceBody != "" {
 					itemBody, _ = sjson.Set(itemBody, "instanceValues", instanceBody)
 				}
+				itemBody, _ = sjson.Set(itemBody, "deployment", true)
 				if !item.DeployConfig.IsNull() && !item.DeployConfig.IsUnknown() {
-				    itemBody, _ = sjson.Set(itemBody, "deployment", item.DeployConfig.ValueBool())
 					if item.DeployConfig.ValueBool() == true {
 						DeployConfig = true
 					}

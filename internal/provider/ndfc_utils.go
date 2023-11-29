@@ -215,6 +215,7 @@ func (client *NdfcClient) Deploy(ctx context.Context, state VRF, expectedStatus 
 	}
 	stateReached := client.WaitForStatus(ctx, state, expectedStatus)
 	if stateReached == failed {
+		time.Sleep(5 * time.Second)
 		res, err, diags = client.ndfcRestApiRequest(ctx, "POST", state.getPath()+"deployments", body)
 		if err != nil {
 			diags.AddError("Client Error", fmt.Sprintf("Failed to POST, got error: %s, %s", err, res.String()))

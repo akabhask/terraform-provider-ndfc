@@ -20,7 +20,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -94,6 +93,7 @@ func (client *NdfcClient) ndfcVrfCreate(ctx context.Context, req resource.Create
 func (client *NdfcClient) ndfcVrfRead(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse, v *VRF) bool {
 
 	res, err, _ := client.ndfcRestApiRequest(ctx, "GET", fmt.Sprintf("%v%v", v.getPath(), v.VrfName.ValueString()), "")
+
 	if err != nil {
 		if strings.Contains(err.Error(), "StatusCode 400") || strings.Contains(err.Error(), "StatusCode 500") {
 			resp.State.RemoveResource(ctx)
@@ -157,6 +157,7 @@ func (client *NdfcClient) ndfcVrfUpdate(ctx context.Context, req resource.Update
 			return failed
 		}
 	}
+
 	res, err, diags = client.ndfcRestApiRequest(ctx, "GET", fmt.Sprintf("%v%v", v.getPath(), v.VrfName.ValueString()), "")
 	if err != nil {
 		if ndfcCheckDiags(diags, resp) {
@@ -208,13 +209,11 @@ func (client *NdfcClient) ndfcVrfDelete(ctx context.Context, req resource.Delete
 	// delete vrf
 	res, err, diags = client.ndfcRestApiRequest(ctx, "DELETE", fmt.Sprintf("%v%v", v.getPath(), v.VrfName.ValueString()), "")
 	if err != nil {
-		log.Printf("Delete failed ")
 		if ndfcCheckDiags(diags, resp) {
 			tflog.Debug(ctx, fmt.Sprintf("Failed to (DELETE) object , got error: %s, %s", err, res.String()))
 			return failed
 		}
 	}
-	log.Printf("Delete finished successfully ")
 	tflog.Debug(ctx, fmt.Sprintf("%s: Delete finished successfully", v.Id.ValueString()))
 	return success
 }
