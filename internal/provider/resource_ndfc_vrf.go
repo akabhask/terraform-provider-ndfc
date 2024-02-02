@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"reflect"
+	"log"
 
 	"github.com/hashicorp/terraform-plugin-framework-validators/int64validator"
 	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
@@ -329,36 +331,44 @@ func (r *NdfcClient) Schema(ctx context.Context, req resource.SchemaRequest, res
 						"vlan_id": schema.Int64Attribute{
 							MarkdownDescription: helpers.NewAttributeDescription("Override VLAN ID. `-1` to use VLAN ID defined at VRF level").AddIntegerRangeDescription(-1, 4092).AddDefaultValueDescription("-1").String,
 							Optional:            true,
-							Computed:            true,
+							//Computed:            true,
 							Validators: []validator.Int64{
 								int64validator.Between(-1, 4092),
 							},
-							Default: int64default.StaticInt64(-1),
+							//Default: int64default.StaticInt64(-1),
 						},
 						"freeform_config": schema.StringAttribute{
 							MarkdownDescription: helpers.NewAttributeDescription("This field covers any configuration not included in overlay templates which is needed as part of this VRF attachment").String,
 							Optional:            true,
+							//Computed:            true,
+							//Default:  stringdefault.StaticString(""),
 						},
 						"loopback_id": schema.Int64Attribute{
 							MarkdownDescription: helpers.NewAttributeDescription("Override loopback ID").AddIntegerRangeDescription(0, 1023).String,
 							Optional:            true,
+							//Computed:            true,
 							Validators: []validator.Int64{
 								int64validator.Between(0, 1023),
 							},
+							//Default: int64default.StaticInt64(-1),
 						},
 						"deploy_config": schema.BoolAttribute{
 							MarkdownDescription: helpers.NewAttributeDescription("Deploy VRF attachments").AddDefaultValueDescription("false").String,
 							Optional:            true,
-							Computed:            true,
-							Default:             booldefault.StaticBool(false),
+							//Computed:            true,
+							//Default:             booldefault.StaticBool(false),
 						},
 						"loopback_ipv4": schema.StringAttribute{
 							MarkdownDescription: helpers.NewAttributeDescription("Override loopback IPv4 address").String,
 							Optional:            true,
+							//Computed:            true,
+							//Default:  stringdefault.StaticString(""),
 						},
 						"loopback_ipv6": schema.StringAttribute{
 							MarkdownDescription: helpers.NewAttributeDescription("Override loopback IPv6 address").String,
 							Optional:            true,
+							//Computed:            true,
+							//Default:  stringdefault.StaticString(""),
 						},
 					},
 				},
@@ -381,6 +391,7 @@ func (r *NdfcClient) Configure(_ context.Context, req resource.ConfigureRequest,
 func (r *NdfcClient) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
 	var state VRF
 	// Read plan
+	logit()
 	diags := req.Plan.Get(ctx, &state)
 	if ndfcCheckDiags(diags, resp) {
 		return
@@ -400,7 +411,7 @@ func (r *NdfcClient) Create(ctx context.Context, req resource.CreateRequest, res
 
 func (r *NdfcClient) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
 	var state VRF
-
+    logit()
 	// Read state
 	diags := req.State.Get(ctx, &state)
 	tflog.Info(ctx, fmt.Sprintf(" Read call state : %v", state.VrfName.ValueString()))
@@ -428,7 +439,9 @@ func (r *NdfcClient) Read(ctx context.Context, req resource.ReadRequest, resp *r
 }
 
 func (r *NdfcClient) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var plan, state VRF
+	var plan, state, temp VRF
+	var delete_attachments bool = false
+	logit()
 	// Read the plan after computing the change
 	diags := req.Plan.Get(ctx, &plan)
 	if ndfcCheckDiags(diags, resp) {
@@ -439,26 +452,67 @@ func (r *NdfcClient) Update(ctx context.Context, req resource.UpdateRequest, res
 	if ndfcCheckDiags(diags, resp) {
 		tflog.Debug(ctx,"Timeout is set for UPDATE operation")
 	}
-
+    log.Printf("Akash Plan config : %v", plan)
 	tflog.Debug(ctx, fmt.Sprintf("%s: Beginning Update", plan.Id.ValueString()))
 	ctx, diags = state.ndfcSetTimeOut(ctx, "UPDATE")
 	if ndfcCheckDiags(diags, resp) {
 		tflog.Debug(ctx,"Timeout is set for UPDATE operation")
 	}
 
-	plan.VrfId = state.VrfId
-	if r.ndfcVrfUpdate(ctx, req, resp, &plan) == failed {
-		return
+	is_equal := reflect.DeepEqual(plan, state)
+	log.Printf("Akash is_equal plan and state : %v", is_equal)
+	if !is_equal {
+		temp = plan
+		if len(plan.Attachments) > 0 {
+			delete_attachments = false
+			if len (state.Attachments) > 0 {
+				is_equal := reflect.DeepEqual(plan.Attachments, state.Attachments)
+				log.Printf("Akash is_equal plan.Attachments and state.Attachments : %v", is_equal)
+				if is_equal {
+					temp.Attachments = nil
+				} else {
+					tempNewAttachments, tempDelAttachments := r.ndfcCompareVrfAttachments(plan, state)
+					log.Printf("Akash tempNewAttachments %v : tempDelAttachments %v ", tempNewAttachments, tempDelAttachments)
+					if len(tempDelAttachments) > 0 {
+						temp.Attachments = tempDelAttachments
+						delete_attachments = true
+						if r.ndfcVrfUpdate(ctx, req, resp, &temp, delete_attachments) == failed {
+							return
+						}
+					}
+					if len(tempNewAttachments) > 0 {
+						temp.Attachments = tempNewAttachments
+						delete_attachments = false
+						if r.ndfcVrfUpdate(ctx, req, resp, &temp, delete_attachments) == failed {
+							return
+						}
+					}
+				}
+			}
+		} else {
+			if len (state.Attachments) > 0 {
+				log.Printf("state.Attachments > 0 true")
+				temp.Attachments = state.Attachments
+				delete_attachments = true
+			} else{
+				delete_attachments = false
+			}
+		}
+		log.Printf("Akash len delete_attachments : %v", delete_attachments)
+		if r.ndfcVrfUpdate(ctx, req, resp, &temp, delete_attachments) == failed {
+			return
+		}
 	}
+	state = plan
 	tflog.Debug(ctx, fmt.Sprintf("%s: Update finished successfully", plan.Id.ValueString()))
-
-	diags = resp.State.Set(ctx, &plan)
+	diags = resp.State.Set(ctx, &state)
 	ndfcCheckDiags(diags, resp)
 }
 
 func (r *NdfcClient) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
 	var state VRF
 	// Read state
+	logit()
 	diags := req.State.Get(ctx, &state)
 
 	if ndfcCheckDiags(diags, resp) {

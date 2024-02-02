@@ -32,7 +32,8 @@ import (
 )
 
 const (
-	FABRIC_DEPLOY_TIMEOUT = 60
+	NDFC_CHECK_STATUS_RETRIES = 3
+	NDFC_CHECK_STATUS_DELAY   = 4
 )
 
 func Contains(s []string, str string) bool {

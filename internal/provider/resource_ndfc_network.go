@@ -551,7 +551,7 @@ func (r *NetworkResource) Deploy(ctx context.Context, state Network, expectedSta
 func (r *NetworkResource) WaitForStatus(ctx context.Context, state Network, expectedStatus string) diag.Diagnostics {
 	var diags diag.Diagnostics
 	status := ""
-	for i := 0; i < (helpers.FABRIC_DEPLOY_TIMEOUT / 5); i++ {
+	for i := 0; i < (helpers.NDFC_CHECK_STATUS_RETRIES); i++ {
 		res, err := r.client.Get(state.getPath())
 		if err != nil {
 			diags.AddError("Client Error", fmt.Sprintf("Failed to retrieve networks, got error: %s, %s", err, res.String()))

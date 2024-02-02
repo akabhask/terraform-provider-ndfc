@@ -225,65 +225,59 @@ func (data VRF) toBody(ctx context.Context) string {
 	return body
 }
 
-func (data VRF) toBodyAttachments(ctx context.Context, attachments gjson.Result) string {
+func (data VRF) toBodyAttachments(ctx context.Context, attachments gjson.Result, forced_dettach bool) string {
 	body := ""
 	body, _ = sjson.Set(body, "0.vrfName", data.VrfName.ValueString())
 	body, _ = sjson.Set(body, "0.lanAttachList", []interface{}{})
-	attachments.Get("0").ForEach(func(k, v gjson.Result) bool {
-		serialNumber := v.Get("switchSerialNo").String()
-		itemBody := ""
-		if !data.FabricName.IsNull() && !data.FabricName.IsUnknown() {
-			itemBody, _ = sjson.Set(itemBody, "fabric", data.FabricName.ValueString())
-		}
-		if !data.VrfName.IsNull() && !data.VrfName.IsUnknown() {
-			itemBody, _ = sjson.Set(itemBody, "vrfName", data.VrfName.ValueString())
-		}
-		found := false
-		for _, item := range data.Attachments {
-			log.Printf("Akash item %v", item )
-			if item.SerialNumber.ValueString() == serialNumber {
-				found = true
-				if !item.SerialNumber.IsNull() && !item.SerialNumber.IsUnknown() {
-					itemBody, _ = sjson.Set(itemBody, "serialNumber", item.SerialNumber.ValueString())
-				}
-				if !item.VlanId.IsNull() && !item.VlanId.IsUnknown() {
-					itemBody, _ = sjson.Set(itemBody, "vlan", item.VlanId.ValueInt64())
-				}
-				if !item.FreeformConfig.IsNull() && !item.FreeformConfig.IsUnknown() {
-					itemBody, _ = sjson.Set(itemBody, "freeformConfig", item.FreeformConfig.ValueString())
-				}
-				instanceBody := ""
-				if !item.LoopbackId.IsNull() && !item.LoopbackId.IsUnknown() {
-					instanceBody, _ = sjson.Set(instanceBody, "loopbackId", item.LoopbackId.ValueInt64())
-				}
-				if !item.LoopbackIpv4.IsNull() && !item.LoopbackIpv4.IsUnknown() {
-					instanceBody, _ = sjson.Set(instanceBody, "loopbackIpAddress", item.LoopbackIpv4.ValueString())
-				}
-				if !item.LoopbackIpv6.IsNull() && !item.LoopbackIpv6.IsUnknown() {
-					instanceBody, _ = sjson.Set(instanceBody, "loopbackIpV6Address", item.LoopbackIpv6.ValueString())
-				}
-				if instanceBody != "" {
-					itemBody, _ = sjson.Set(itemBody, "instanceValues", instanceBody)
-				}
+	serialNumber := attachments.Get("switchSerialNo").String()
+	itemBody := ""
+	if !data.FabricName.IsNull() && !data.FabricName.IsUnknown() {
+		itemBody, _ = sjson.Set(itemBody, "fabric", data.FabricName.ValueString())
+	}
+	if !data.VrfName.IsNull() && !data.VrfName.IsUnknown() {
+		itemBody, _ = sjson.Set(itemBody, "vrfName", data.VrfName.ValueString())
+	}
+	found := false
+	log.Printf("Akash data.Attachments %v", data.Attachments )
+	for _, item := range data.Attachments {
+		log.Printf("Akash item %v", item )
+		if item.SerialNumber.ValueString() == serialNumber {
+			found = true
+			if !item.SerialNumber.IsNull() && !item.SerialNumber.IsUnknown() {
+				itemBody, _ = sjson.Set(itemBody, "serialNumber", item.SerialNumber.ValueString())
+			}
+			if !item.VlanId.IsNull() && !item.VlanId.IsUnknown() {
+				itemBody, _ = sjson.Set(itemBody, "vlan", item.VlanId.ValueInt64())
+			}
+			if !item.FreeformConfig.IsNull() && !item.FreeformConfig.IsUnknown() {
+				itemBody, _ = sjson.Set(itemBody, "freeformConfig", item.FreeformConfig.ValueString())
+			}
+			instanceBody := ""
+			if !item.LoopbackId.IsNull() && !item.LoopbackId.IsUnknown() {
+				instanceBody, _ = sjson.Set(instanceBody, "loopbackId", item.LoopbackId.ValueInt64())
+			}
+			if !item.LoopbackIpv4.IsNull() && !item.LoopbackIpv4.IsUnknown() {
+				instanceBody, _ = sjson.Set(instanceBody, "loopbackIpAddress", item.LoopbackIpv4.ValueString())
+			}
+			if !item.LoopbackIpv6.IsNull() && !item.LoopbackIpv6.IsUnknown() {
+				instanceBody, _ = sjson.Set(instanceBody, "loopbackIpV6Address", item.LoopbackIpv6.ValueString())
+			}
+			if instanceBody != "" {
+				itemBody, _ = sjson.Set(itemBody, "instanceValues", instanceBody)
+			}
+			if forced_dettach {
+				itemBody, _ = sjson.Set(itemBody, "deployment", false)
+			} else {
 				itemBody, _ = sjson.Set(itemBody, "deployment", true)
-				if !item.DeployConfig.IsNull() && !item.DeployConfig.IsUnknown() {
-					if item.DeployConfig.ValueBool() == true {
-						DeployConfig = true
-					}
-				} else {
-					itemBody, _ = sjson.Set(itemBody, "deployment", false)
-				}
 			}
 		}
-		if !found {
-			itemBody, _ = sjson.Set(itemBody, "serialNumber", serialNumber)
-			itemBody, _ = sjson.Set(itemBody, "vlan", v.Get("vlanId").Int())
-			itemBody, _ = sjson.Set(itemBody, "deployment", false)
-		}
-		body, _ = sjson.SetRaw(body, "0.lanAttachList.-1", itemBody)
-
-		return true // keep iterating
-	})
+	}
+	if !found {
+		itemBody, _ = sjson.Set(itemBody, "serialNumber", serialNumber)
+		itemBody, _ = sjson.Set(itemBody, "vlan", attachments.Get("vlanId").Int())
+		itemBody, _ = sjson.Set(itemBody, "deployment", false)
+	}
+	body, _ = sjson.SetRaw(body, "0.lanAttachList.-1", itemBody)
 	return body
 }
 
@@ -495,14 +489,14 @@ func (data *VRF) fromBody(ctx context.Context, res gjson.Result) {
 	}
 }
 
+
 func (data *VRF) fromBodyAttachments(ctx context.Context, res gjson.Result, all bool) {
-	serialsToRemove := []string{}
 	res.Get("0").ForEach(func(k, v gjson.Result) bool {
 		serialNumber := v.Get("switchSerialNo").String()
-		attached := v.Get("isLanAttached").Bool()
-		if all {
-			if attached {
-				var item VRFAttachments
+		log.Printf("Akash v %v", v)
+		log.Printf("Akash data.Attachments %v", data.Attachments)
+		for _, item := range data.Attachments {
+			if item.SerialNumber.ValueString() == serialNumber {
 				if value := v.Get("switchSerialNo"); value.Exists() {
 					item.SerialNumber = types.StringValue(value.String())
 				} else {
@@ -528,48 +522,9 @@ func (data *VRF) fromBodyAttachments(ctx context.Context, res gjson.Result, all 
 				} else {
 					item.LoopbackIpv6 = types.StringNull()
 				}
-				data.Attachments = append(data.Attachments, item)
-			}
-		} else {
-			for _, item := range data.Attachments {
-				if item.SerialNumber.ValueString() == serialNumber {
-					if attached {
-						if value := v.Get("vlanId"); value.Exists() {
-							item.VlanId = types.Int64Value(value.Int())
-						} else {
-							item.VlanId = types.Int64Null()
-						}
-						if value := v.Get("instanceValues.loopbackId"); value.Exists() {
-							item.LoopbackId = types.Int64Value(value.Int())
-						} else {
-							item.LoopbackId = types.Int64Null()
-						}
-						if value := v.Get("instanceValues.loopbackIpAddress"); value.Exists() {
-							item.LoopbackIpv4 = types.StringValue(value.String())
-						} else {
-							item.LoopbackIpv4 = types.StringNull()
-						}
-						if value := v.Get("instanceValues.loopbackIpV6Address"); value.Exists() {
-							item.LoopbackIpv6 = types.StringValue(value.String())
-						} else {
-							item.LoopbackIpv6 = types.StringNull()
-						}
-					} else {
-						serialsToRemove = append(serialsToRemove, serialNumber)
-					}
-				}
 			}
 		}
 		return true
 	})
-	for i := range data.Attachments {
-		if ((i > 0) && (i < len(data.Attachments))) {
-			for _, serial := range serialsToRemove {
-			    if data.Attachments[i].SerialNumber.ValueString() == serial {
-				    data.Attachments = append(data.Attachments[:i], data.Attachments[i+1:]...)
-				    break
-				}
-		    }
-	    }
-	}
+	log.Printf("Akash  filled serialNumber %v", data.Attachments)
 }

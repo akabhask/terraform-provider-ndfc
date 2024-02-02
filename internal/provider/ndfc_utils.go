@@ -49,12 +49,6 @@ var success = true
 type NdfcUserTimeout interface {
 	ndfcSetTimeOut()
 }
-type ndfcGetPathName interface {
-	getPath()
-}
-type ndfcRestApiRequest interface {
-	ndfcRestApiRequest()
-}
 type Any interface{}
 
 // Get path for vrf resources
@@ -102,18 +96,18 @@ request_retry:
 	tflog.Debug(ctx, fmt.Sprintf(" ndfcRestApiRequest requesttype: %v path %v res : %v  err %v payload",
 		requestType, path, res.String(), err))
 	if err != nil {
-		if strings.Contains(res.String(), "already exists") {
-			// if entity already exists, continue with operation
-			tflog.Debug(ctx, fmt.Sprintf("already exists continue with next operation : payload : %v", payLoad))
-			return res, nil, diags
-		}
 		if strings.Contains(res.String(), "connect: operation timed out") {
 			// Sometimes connection to NDFC fails, we retry till we connect
-			tflog.Debug(ctx, "operation timed out")
+			tflog.Debug(ctx, res.String())
 			time.Sleep(10 * time.Second)
 			goto request_retry
 		}
-
+		if strings.Contains(err.Error(), "connection refused") {
+			// Sometimes connection to NDFC fails, we retry till we connect
+			tflog.Debug(ctx, res.String())
+			time.Sleep(10 * time.Second)
+			goto request_retry
+		}
 		diags.AddError("Client Error",
 			fmt.Sprintf("Failed to perform operation (%s) got error: %s, %s", requestType, err, res.String()))
 	}
@@ -146,81 +140,145 @@ func (v *VRF) ndfcSetTimeOut(ctx context.Context, operation string) (context.Con
 	return ctx, diags
 }
 
-func (client *NdfcClient) WaitForStatus(ctx context.Context, state VRF, expectedStatus string) bool {
-	for i := 0; i < (helpers.FABRIC_DEPLOY_TIMEOUT / 5); i++ {
-		time.Sleep(1 * time.Second)
-		res, err, _ := client.ndfcRestApiRequest(ctx, "GET",
-			fmt.Sprintf("%v", state.getPath()), "")
-		if err != nil {
-			continue
-		}
-		status := res.Get(`#(vrfName="` + state.VrfName.ValueString() + `").vrfStatus`).String()
-		if strings.Contains(status, expectedStatus) {
-			return client.checkStateStabilized(ctx, state, expectedStatus, 10)
-		}
-	}
-	return failed
-}
-func (r *NdfcClient) checkStateStabilized(ctx context.Context, state VRF, expectedStatus string, retry int) bool {
-	for i := 0; i < retry; i++ {
-		time.Sleep(3 * time.Second)
-		res, err, _ := r.ndfcRestApiRequest(ctx, "GET", state.getPath(), "")
-		if err != nil {
-			continue
-		}
-		status := res.Get(`#(vrfName="` + state.VrfName.ValueString() + `").vrfStatus`).String()
-		tflog.Debug(ctx, fmt.Sprintf(" checkExpectedState status: %v %v %v", status, i, retry))
-		if !strings.Contains(status, expectedStatus) {
-			return failed
-		}
-	}
-	return success
-}
-
-func (client *NdfcClient) Deploy(ctx context.Context, state VRF, expectedStatus string) diag.Diagnostics {
+func (client *NdfcClient) WaitForStatus(ctx context.Context, serial_number string, v VRF, expectedStatus string) string {
+	var CurrentStatus string
 	var diags diag.Diagnostics
-	tflog.Debug(ctx, fmt.Sprintf("%s: Beginning Deploy", state.Id.ValueString()))
 
+	for i := 0; i < helpers.NDFC_CHECK_STATUS_RETRIES; i++ {
+		time.Sleep(helpers.NDFC_CHECK_STATUS_DELAY * time.Second)
+		CurrentStatus, diags = client.ndfcGetAttachmentsPerVrf(ctx, v, serial_number)
+		if diags.HasError() {
+			tflog.Debug(ctx, fmt.Sprintf("ndfcGetAttachmentsPerVrf failed for VRF %v",
+				v.VrfName.ValueString()))
+			return CurrentStatus
+		}
+		log.Printf("WaitForStatus Akash status string %v", CurrentStatus)
+		tflog.Debug(ctx, fmt.Sprintf("WaitForStatus status: %v try: %v", CurrentStatus, i))
+		if strings.Contains(expectedStatus, CurrentStatus) {
+			return CurrentStatus
+		}
+
+	}
+	return CurrentStatus
+}
+func (r *NdfcClient) checkStateStabilized(ctx context.Context, serial_number string, v VRF, expectedStatus string) string {
+	var CurrentStatus string
+	var diags diag.Diagnostics
+
+	for i := 0; i < helpers.NDFC_CHECK_STATUS_RETRIES; i++ {
+		time.Sleep(helpers.NDFC_CHECK_STATUS_DELAY * time.Second)
+		CurrentStatus, diags = r.ndfcGetAttachmentsPerVrf(ctx, v, serial_number)
+		if diags.HasError() {
+			tflog.Debug(ctx, fmt.Sprintf("ndfcGetAttachmentsPerVrf failed for VRF %v",
+				v.VrfName.ValueString()))
+			return CurrentStatus
+		}
+		log.Printf("checkStateStabilized Akash status string %v %v %v", CurrentStatus, expectedStatus, i)
+		tflog.Debug(ctx, fmt.Sprintf("checkExpectedState status: %v %v %v", CurrentStatus, expectedStatus, i))
+		if !strings.Contains(expectedStatus, CurrentStatus) {
+			return CurrentStatus
+		}
+	}
+	return CurrentStatus
+}
+
+func (client *NdfcClient) Deploy(ctx context.Context, v VRF, serial_number string, expectedStatus string) (diag.Diagnostics, map[string]bool) {
+	var diags diag.Diagnostics
+	var CurrentStatus string
+	var res gjson.Result
+	not_deployed_list := make(map[string]bool)
+	var err error
+
+	NextValidState := "DEPLOYED OUT-OF-SYNC FAILED PENDING NA"
+	logit()
+	tflog.Debug(ctx, fmt.Sprintf("%s: Beginning Deploy", v.Id.ValueString()))
 	body := ""
-	body, _ = sjson.Set(body, "vrfNames", state.VrfName.ValueString())
-	res, err, diags := client.ndfcRestApiRequest(ctx, "GET", state.getPath(), "")
-	if err != nil {
-		diags.AddError("Client Error", fmt.Sprintf("Failed to retrieve VRFs, got error: %s, %s", err, res.String()))
-		return diags
-	}
-	vrfStatus := res.Get(`#(vrfName="` + state.VrfName.ValueString() + `").vrfStatus`).String()
-	if expectedStatus == vrfStatus {
-		stateReached := client.checkStateStabilized(ctx, state, expectedStatus, 1)
-		log.Printf("stateReached: %v", stateReached)
-		if stateReached == success {
-			return diags
+	body, _ = sjson.Set(body, serial_number, v.VrfName.ValueString())
+	log.Printf("Akash deploy body %v", body)
+	for i := 0; i < 2; i++ {
+		CurrentStatus, diags = client.ndfcGetAttachmentsPerVrf(ctx, v, serial_number)
+		if diags.HasError() {
+			tflog.Debug(ctx, fmt.Sprintf("ndfcGetAttachmentsPerVrf failed for VRF %v",
+				v.VrfName.ValueString()))
+			not_deployed_list[serial_number] = true
+			return diags, not_deployed_list
+		}
+		log.Printf("Akash CurrentStatus: %v serial_number %v", CurrentStatus, serial_number)
+		if strings.Contains(CurrentStatus, "IN PROGRESS") {
+			CurrentStatus = client.WaitForStatus(ctx, serial_number, v, NextValidState)
+			if !strings.Contains(NextValidState, CurrentStatus) {
+				diags.AddError("Client Error", fmt.Sprintf("unknown v: %v reached when trying to deploy",
+					CurrentStatus))
+				not_deployed_list[serial_number] = true
+				return diags, not_deployed_list
+			}
+		}
+		CurrentStatus = client.checkStateStabilized(ctx, serial_number, v, expectedStatus)
+		log.Printf("Akash CurrentStatus after IN PROGRESS: %v", CurrentStatus)
+		switch CurrentStatus {
+		case "DEPLOYED":
+			if expectedStatus == "DEPLOYED" {
+				return diags, not_deployed_list
+			}
+		case "NA":
+			if expectedStatus == "NA" {
+				return diags, not_deployed_list
+			}
+		case "OUT-OF-SYNC":
+			fallthrough
+		case "PENDING":
+			res, err, diags = client.ndfcRestApiRequest(ctx, "POST", "/lan-fabric/rest/top-down/vrfs/deploy", body)
+			if err != nil {
+				diags.AddError("Client Error", fmt.Sprintf("Failed to POST, got error: %s, %s", err, res.String()))
+				return diags, not_deployed_list
+			}
+		case "FAILED":
+			not_deployed_list[serial_number] = true
+			return diags, not_deployed_list
+		default:
+			diags.AddError("Client Error", fmt.Sprintf("Unknown state '%s' for serial number '%s' when trying to Deploy", CurrentStatus, serial_number))
+			return diags, not_deployed_list
 		}
 	}
-	switch vrfStatus {
-	case "IN PROGRESS":
-	case "DEPLOYED":
-	case "OUT-OF-SYNC":
-		fallthrough
-	case "PENDING":
-		fallthrough
-	case "NA":
-		res, err, diags = client.ndfcRestApiRequest(ctx, "POST", state.getPath()+"deployments", body)
-		if err != nil {
-			diags.AddError("Client Error", fmt.Sprintf("Failed to POST, got error: %s, %s", err, res.String()))
-			return diags
-		}
-	default:
-		diags.AddError("Client Error", fmt.Sprintf("Invalid state reached in Deploy: %s, %s", err, res.String()))
-		return diags
+	NextValidState = "DEPLOYED OUT-OF-SYNC FAILED NA"
+
+	CurrentStatus = client.WaitForStatus(ctx, serial_number, v, NextValidState)
+	if !strings.Contains(NextValidState, CurrentStatus) {
+		diags.AddError("Client Error", fmt.Sprintf("Reached state %v which is not expected",
+			CurrentStatus))
+		not_deployed_list[serial_number] = true
+		return diags, not_deployed_list
 	}
-	stateReached := client.WaitForStatus(ctx, state, expectedStatus)
-	if stateReached == failed {
-		time.Sleep(5 * time.Second)
-		res, err, diags = client.ndfcRestApiRequest(ctx, "POST", state.getPath()+"deployments", body)
-		if err != nil {
-			diags.AddError("Client Error", fmt.Sprintf("Failed to POST, got error: %s, %s", err, res.String()))
-			return diags
+	if CurrentStatus == "FAILED" || CurrentStatus == "OUT-OF-SYNC" {
+		not_deployed_list[serial_number] = true
+		return diags, not_deployed_list
+	}
+
+	CurrentStatus = client.checkStateStabilized(ctx, serial_number, v, CurrentStatus)
+	if !strings.Contains(NextValidState, CurrentStatus) {
+		diags.AddError("Client Error", fmt.Sprintf("Reached state %v which is not expected",
+			CurrentStatus))
+		not_deployed_list[serial_number] = true
+		return diags, not_deployed_list
+	}
+	if CurrentStatus == "FAILED" || CurrentStatus == "OUT-OF-SYNC" {
+		not_deployed_list[serial_number] = true
+		return diags, not_deployed_list
+	}
+
+	if expectedStatus == "NA" {
+		if CurrentStatus == "NA" {
+			not_deployed_list[serial_number] = false
+			return diags, not_deployed_list
+		}
+	} else if expectedStatus == "DEPLOYED" {
+		if CurrentStatus == "DEPLOYED" {
+			not_deployed_list[serial_number] = false
+			return diags, not_deployed_list
 		}
 	}
-	return diags
+
+	tflog.Debug(ctx, fmt.Sprintf("Reached state '%v' which is not expected ", CurrentStatus))
+	not_deployed_list[serial_number] = true
+	return diags, not_deployed_list
 }
